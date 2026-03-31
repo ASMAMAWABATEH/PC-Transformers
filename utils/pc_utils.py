@@ -28,14 +28,13 @@ def precompute_freqs_cis_real(dim: int, end: int, theta: float = 10000.0):
     return cos, sin
 
 
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
+def rotate_pairs(x: torch.Tensor) -> torch.Tensor:
     """
-    Rotates half the hidden dims of the input.
-    Used for the RoPE 'real' implementation trick.
+    Rotates each (even, odd) pair in the last dimension.
     """
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+    x_ = x.view(*x.shape[:-1], -1, 2)  # reshape last dim into pairs: [..., head_dim//2, 2] even odd pairs
+    x_rot = torch.stack([-x_[..., 1], x_[..., 0]], dim=-1)  
+    return x_rot.flatten(-2)  # flatten back to original last dim
 
 def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -45,8 +44,8 @@ def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, cos: torch.Tensor, sin:
     cos = cos.unsqueeze(0).unsqueeze(0)
     sin = sin.unsqueeze(0).unsqueeze(0)
     
-    xq_out = (xq * cos) + (rotate_half(xq) * sin)
-    xk_out = (xk * cos) + (rotate_half(xk) * sin)
+    xq_out = (xq * cos) + (rotate_pairs(xq) * sin)
+    xk_out = (xk * cos) + (rotate_pairs(xk) * sin)
     return xq_out, xk_out
 
 def step_embed(
@@ -85,7 +84,7 @@ def step_embed(
             delta = torch.clamp(local_lr * flat_update, -0.01, 0.01)
             word_layer.weight.data.index_add_(0, flat_input_ids, delta)
             
-    return mu, mu_word, mu_pos, error
+    return mu, mu_word, error
     
 def step_linear(
     t: int,
@@ -230,7 +229,7 @@ def step_attn(
     else:
         mu_heads, attn_weights, attn_scores = apply_standard_attention(Q, K, V, mask=causal_mask)
     
-    mu = mu_heads.transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
+    mu = mu_heads.transpose(1, 2).contiguous().view(B, S, E)
     bu_err = target - mu  # B, T, D
     
     error = bu_err - td_err if td_err is not None else bu_err  
@@ -238,7 +237,7 @@ def step_attn(
     scale = 1.0 / (head_dim ** 0.5)
 
     dE_dmu = -bu_err  
-    dE_dmu_heads = dE_dmu.view(batch_size, num_heads, seq_len, head_dim)
+    dE_dmu_heads = dE_dmu.view(B, num_heads, S, head_dim)
     # dE/dV = A^T @ dE/dμ
     dE_dV = torch.matmul(attn_weights.transpose(-2, -1), dE_dmu_heads)
 
@@ -251,14 +250,18 @@ def step_attn(
 
     dE_dQ = torch.matmul(dE_dS, K) * scale
     dE_dK = torch.matmul(dE_dS.transpose(-2, -1), Q) * scale
+    cos_s = cos[:S].unsqueeze(0).unsqueeze(0)
+    sin_s = sin[:S].unsqueeze(0).unsqueeze(0)
 
+    dE_dQ_raw = (dE_dQ * cos_s) - (rotate_pairs(dE_dQ) * sin_s)
+    dE_dK_raw = (dE_dK * cos_s) - (rotate_pairs(dE_dK) * sin_s)
     delta_x = torch.zeros_like(x_norm)
 
     # Update x per head
     for h in range(num_heads):
         delta_x_h = (
-            dE_dQ[:, h] @ q_proj.weight[h*head_dim:(h+1)*head_dim] +
-            dE_dK[:, h] @ k_proj.weight[h*head_dim:(h+1)*head_dim] +
+            dE_dQ_raw[:, h] @ q_proj.weight[h*head_dim:(h+1)*head_dim] +
+            dE_dK_raw[:, h] @ k_proj.weight[h*head_dim:(h+1)*head_dim] +
             dE_dV[:, h] @ v_proj.weight[h*head_dim:(h+1)*head_dim]
         )
         delta_x += delta_x_h
@@ -278,8 +281,8 @@ def step_attn(
     if requires_update:
       with torch.no_grad():
         for h in range(num_heads):
-            dW_q = torch.einsum("btd,bte->de", dE_dQ[:, h], x_norm)
-            dW_k = torch.einsum("btd,bte->de", dE_dK[:, h], x_norm)
+            dW_q = torch.einsum("btd,bte->de", dE_dQ_raw[:, h], x_norm)
+            dW_k = torch.einsum("btd,bte->de", dE_dK_raw[:, h], x_norm)
             dW_v = torch.einsum("btd,bte->de", dE_dV[:, h], x_norm)
             q_proj.weight.data[h*head_dim:(h+1)*head_dim] += local_lr * dW_q
             k_proj.weight.data[h*head_dim:(h+1)*head_dim] += local_lr * dW_k
