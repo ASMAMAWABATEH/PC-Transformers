@@ -289,7 +289,7 @@ def step_attn(
             v_proj.weight.data[h*head_dim:(h+1)*head_dim] += local_lr * dW_v
 
          
-    return x, mu, bu_err, new_kv_cache
+    return x, mu, bu_err
 
 ENERGY_FUNCTIONS = {
     "pc_e": lambda mu, x: ((mu - x) ** 2) * 0.5,    

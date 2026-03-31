@@ -111,7 +111,7 @@ class PCLayer(nn.Module):
         
         elif layer_type == "attn":
             lateral_conn = self.lateral_connections.get(layer_type, None)
-            x, mu, bu_err, new_kv_cache = step_attn(
+            x, mu, bu_err = step_attn(
                 t,
                 T,
                 target_activity,
@@ -134,8 +134,8 @@ class PCLayer(nn.Module):
                 use_cache=use_cache,
             )
             # Store cache for retrieval
-            if use_cache:
-                self._last_kv_cache = new_kv_cache
+            # if use_cache:
+            #     self._last_kv_cache = new_kv_cache
         
         else:
             lateral_conn = self.lateral_connections.get(layer_type, None)
