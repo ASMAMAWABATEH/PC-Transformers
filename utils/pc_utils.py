@@ -28,13 +28,14 @@ def precompute_freqs_cis_real(dim: int, end: int, theta: float = 10000.0):
     return cos, sin
 
 
-def rotate_pairs(x: torch.Tensor) -> torch.Tensor:
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
-    Rotates each (even, odd) pair in the last dimension.
+    Rotates half the hidden dims of the input.
+    Used for the RoPE 'real' implementation trick.
     """
-    x_ = x.view(*x.shape[:-1], -1, 2)  # reshape last dim into pairs: [..., head_dim//2, 2] even odd pairs
-    x_rot = torch.stack([-x_[..., 1], x_[..., 0]], dim=-1)  
-    return x_rot.flatten(-2)  # flatten back to original last dim
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -44,9 +45,19 @@ def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, cos: torch.Tensor, sin:
     cos = cos.unsqueeze(0).unsqueeze(0)
     sin = sin.unsqueeze(0).unsqueeze(0)
     
-    xq_out = (xq * cos) + (rotate_pairs(xq) * sin)
-    xk_out = (xk * cos) + (rotate_pairs(xk) * sin)
+    xq_out = (xq * cos) + (rotate_half(xq) * sin)
+    xk_out = (xk * cos) + (rotate_half(xk) * sin)
     return xq_out, xk_out
+
+def rotate_half_transpose(x: torch.Tensor) -> torch.Tensor:
+    """
+    Transpose of rotate_half operation.
+    Forward: [x1, x2] -> [-x2, x1]
+    Transpose: [y1, y2] -> [y2, -y1]
+    """
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((x2, -x1), dim=-1)
 
 def step_embed(
     t: int,
@@ -95,6 +106,7 @@ def step_linear(
     lateral_conn: Optional[Any], 
     layer_type: str,
     local_lr: float,
+    inference_lr: float,
     clamp_value: float,
     energy_fn_name: str,
     update_bias: bool,
@@ -123,7 +135,7 @@ def step_linear(
     if layer_type=="linear_output":
         probs = F.softmax(mu, dim=-1) 
         bu_err= target - probs
-        dE_dp= -bu_err
+        dE_dp= bu_err
         norm_term = (dE_dp * probs).sum(dim=-1, keepdim=True)
         dE_dmu = probs * (dE_dp - norm_term)
         error_proj= dE_dmu @ layer.weight     # project bottom-up error through weights
@@ -136,11 +148,11 @@ def step_linear(
     error = error_proj- td_err if td_err is not None else error_proj  
    
     if lateral_conn is not None:
-        x = x + local_lr * lateral_conn.forward(x, error)
+        x = x + inference_lr * lateral_conn.forward(x, error)
         if requires_update:
             lateral_conn.update_weights(x.detach())
     else:
-        x = x + local_lr * error 
+        x = x + inference_lr * error 
 
     x = torch.clamp(x, -abs(clamp_value), abs(clamp_value))
     
@@ -151,8 +163,7 @@ def step_linear(
         layer.weight.data.add_(delta_W)
         if layer.bias is not None and update_bias:
             delta_b = local_lr * dE_dmu.mean(dim=(0, 1))
-            delta_b = torch.clamp(delta_b, -0.01, 0.01)
-            layer.bias.data.add_(delta_b)
+            layer.bias.data.add_(torch.clamp(delta_b, -0.01, 0.01))
 
     return x, mu, bu_err
 
@@ -165,6 +176,7 @@ def step_attn(
     proj_layers: dict,
     layer_type: str,
     local_lr: float,
+    inference_lr: float,
     clamp_value: float,
     energy_fn_name: str,
     update_bias: bool,
@@ -230,15 +242,17 @@ def step_attn(
         mu_heads, attn_weights, attn_scores = apply_standard_attention(Q, K, V, mask=causal_mask)
     
     mu = mu_heads.transpose(1, 2).contiguous().view(B, S, E)
-    bu_err = target - mu  # B, T, D
+    bu_err = target - mu
     
     error = bu_err - td_err if td_err is not None else bu_err  
      
     scale = 1.0 / (head_dim ** 0.5)
 
-    dE_dmu = -bu_err  
+    # Backward pass (manual gradients)
+    dE_dmu = bu_err  
     dE_dmu_heads = dE_dmu.view(B, num_heads, S, head_dim)
-    # dE/dV = A^T @ dE/dμ
+    
+    # dE/dV
     dE_dV = torch.matmul(attn_weights.transpose(-2, -1), dE_dmu_heads)
 
     # dE/dA = dE/dμ @ V^T
@@ -247,49 +261,90 @@ def step_attn(
     # Softmax vector-Jacobian product
     norm_term = (dE_dA * attn_weights).sum(dim=-1, keepdim=True)
     dE_dS = attn_weights * (dE_dA - norm_term)
+    
+    # Apply causal mask to gradients
+    if causal_mask is not None:
+        dE_dS = dE_dS.masked_fill(causal_mask == 0, 0.0)
 
+    # Gradients through Q and K
     dE_dQ = torch.matmul(dE_dS, K) * scale
     dE_dK = torch.matmul(dE_dS.transpose(-2, -1), Q) * scale
-    cos_s = cos[:S].unsqueeze(0).unsqueeze(0)
-    sin_s = sin[:S].unsqueeze(0).unsqueeze(0)
 
-    dE_dQ_raw = (dE_dQ * cos_s) - (rotate_pairs(dE_dQ) * sin_s)
-    dE_dK_raw = (dE_dK * cos_s) - (rotate_pairs(dE_dK) * sin_s)
+    # Gradients through RoPE (using transpose)
+    cos_q = cos[:S].unsqueeze(0).unsqueeze(0)
+    sin_q = sin[:S].unsqueeze(0).unsqueeze(0)
+    
+    K_len = K.size(2)
+    cos_k = cos[:K_len].unsqueeze(0).unsqueeze(0)
+    sin_k = sin[:K_len].unsqueeze(0).unsqueeze(0)
+    
+    dE_dQ_raw = (dE_dQ * cos_q) + (rotate_half_transpose(dE_dQ) * sin_q)
+    dE_dK_raw = (dE_dK * cos_k) + (rotate_half_transpose(dE_dK) * sin_k)
+    
     delta_x = torch.zeros_like(x_norm)
 
     # Update x per head
     for h in range(num_heads):
-        delta_x_h = (
-            dE_dQ_raw[:, h] @ q_proj.weight[h*head_dim:(h+1)*head_dim] +
-            dE_dK_raw[:, h] @ k_proj.weight[h*head_dim:(h+1)*head_dim] +
-            dE_dV[:, h] @ v_proj.weight[h*head_dim:(h+1)*head_dim]
-        )
-        delta_x += delta_x_h
+        dq = dE_dQ_raw[:, h]        # [B, S, head_dim]
+        dk = dE_dK_raw[:, h]        # [B, K_len, head_dim]
+        dv = dE_dV[:, h]            # [B, K_len, head_dim]
         
+        if dk.size(1) > S:
+            dk = dk[:, -S:, :]
+            dv = dv[:, -S:, :]
+        
+        wq = q_proj.weight[:, h*head_dim:(h+1)*head_dim]
+        wk = k_proj.weight[:, h*head_dim:(h+1)*head_dim]
+        wv = v_proj.weight[:, h*head_dim:(h+1)*head_dim]
+        
+        delta_q = torch.einsum('bsh,eh->bse', dq, wq)
+        delta_k = torch.einsum('bsh,eh->bse', dk, wk)
+        delta_v = torch.einsum('bsh,eh->bse', dv, wv)
+        
+        delta_x += delta_q + delta_k + delta_v
+            
     if lateral_conn is not None:
         delta_x = lateral_conn.forward(x, delta_x)
-        x = x + local_lr * delta_x
+        x = x + inference_lr * delta_x
         
         if requires_update:
             lateral_conn.update_weights(x.detach())
     else:
-        x = x + local_lr * delta_x
+        x = x + inference_lr * delta_x
 
     x = torch.clamp(x, -abs(clamp_value), abs(clamp_value))
 
-    #PC WEIGHT UPDATE (RAW, PRE-RoPE)
     if requires_update:
-      with torch.no_grad():
-        for h in range(num_heads):
-            dW_q = torch.einsum("btd,bte->de", dE_dQ_raw[:, h], x_norm)
-            dW_k = torch.einsum("btd,bte->de", dE_dK_raw[:, h], x_norm)
-            dW_v = torch.einsum("btd,bte->de", dE_dV[:, h], x_norm)
-            q_proj.weight.data[h*head_dim:(h+1)*head_dim] += local_lr * dW_q
-            k_proj.weight.data[h*head_dim:(h+1)*head_dim] += local_lr * dW_k
-            v_proj.weight.data[h*head_dim:(h+1)*head_dim] += local_lr * dW_v
-
-         
-    return x, mu, bu_err
+        with torch.no_grad():
+            for h in range(num_heads):
+                dW_q = torch.einsum("bte,btd->ed", x_norm, dE_dQ_raw[:, h])
+                dW_k = torch.einsum("bte,btd->ed", x_norm, dE_dK_raw[:, h])
+                dW_v = torch.einsum("bte,btd->ed", x_norm, dE_dV[:, h])
+                
+                dW_q = torch.clamp(dW_q, -0.01, 0.01)
+                dW_k = torch.clamp(dW_k, -0.01, 0.01)
+                dW_v = torch.clamp(dW_v, -0.01, 0.01)
+                
+                q_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_q
+                k_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_k
+                v_proj.weight.data[:, h*head_dim:(h+1)*head_dim] += local_lr * dW_v
+                if update_bias:
+                    if q_proj.bias is not None:
+                        db_q = dE_dQ_raw[:, h].mean(dim=(0, 1))
+                        db_q = torch.clamp(db_q, -0.01, 0.01)
+                        q_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_q
+                    
+                    if k_proj.bias is not None:
+                        db_k = dE_dK_raw[:, h].mean(dim=(0, 1))
+                        db_k = torch.clamp(db_k, -0.01, 0.01)
+                        k_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_k
+                    
+                    if v_proj.bias is not None:
+                        db_v = dE_dV[:, h].mean(dim=(0, 1))
+                        db_v = torch.clamp(db_v, -0.01, 0.01)
+                        v_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_v
+    new_kv_cache = (K.detach(), V.detach()) if use_cache else None
+    return x, mu, bu_err, new_kv_cache
 
 ENERGY_FUNCTIONS = {
     "pc_e": lambda mu, x: ((mu - x) ** 2) * 0.5,    

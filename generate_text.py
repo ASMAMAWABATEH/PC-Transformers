@@ -38,10 +38,12 @@ def generate_text(model, config, input_ids, max_new_tokens, temperature, device 
     
     generated_tokens = []
     
+    # Process prompt once, then only feed last token
+    with torch.no_grad():
+        model(input_tensor, input_tensor, use_kv_cache=True)
+
+    current_input = input_tensor[:, -1:]  # S=1 always
     for step in range(max_new_tokens):
-        # For first token or with cache, pass full or last token
-        current_input = input_tensor[:, -config.block_size:] if input_tensor.size(1) > config.block_size else input_tensor
-      
         logits = model(current_input, current_input, use_kv_cache=use_cache)
         logits = logits[:, -1, :] / temperature
         probs = F.softmax(logits, dim=-1)
@@ -88,6 +90,7 @@ def main():
         vocab_size = vocab_size,
         block_size = best_config["block_size"],
         lr = best_config["peak_learning_rate"],
+        inference_lr = best_config["inference_lr"],
         peak_learning_rate = best_config["peak_learning_rate"],
         warmup_steps = best_config["warmup_steps"],
         n_embed = best_config["n_embed"],
