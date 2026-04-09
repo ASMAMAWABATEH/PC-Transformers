@@ -36,6 +36,7 @@ class PCLayer(nn.Module):
         self.energy_fn_name = energy_fn_name 
         self.num_heads = num_heads
         self.n_embed = n_embed
+        self._last_kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         
         self.lateral_connections: Dict[str, LateralConnections] = {}
         
@@ -113,7 +114,7 @@ class PCLayer(nn.Module):
         
         elif layer_type == "attn":
             lateral_conn = self.lateral_connections.get(layer_type, None)
-            x, mu, bu_err = step_attn(
+            x, mu, bu_err, new_kv_cache = step_attn(
                 t,
                 T,
                 target_activity,
@@ -122,7 +123,6 @@ class PCLayer(nn.Module):
                 proj_layers,
                 layer_type,
                 self.local_lr,
-                self.inference_lr,
                 self.clamp_value,
                 self.energy_fn_name,
                 self.update_bias,
@@ -136,9 +136,8 @@ class PCLayer(nn.Module):
                 kv_cache=kv_cache,  
                 use_cache=use_cache,
             )
-            # Store cache for retrieval
-            # if use_cache:
-            #     self._last_kv_cache = new_kv_cache
+            if use_cache:
+                self._last_kv_cache = new_kv_cache
         
         else:
             lateral_conn = self.lateral_connections.get(layer_type, None)
@@ -151,7 +150,6 @@ class PCLayer(nn.Module):
                 lateral_conn,  
                 layer_type,
                 self.local_lr, 
-                self.inference_lr,
                 self.clamp_value, 
                 self.energy_fn_name, 
                 self.update_bias, 

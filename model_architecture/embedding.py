@@ -17,5 +17,5 @@ class Embedding_Layer(nn.Module):
             lr=config.lr,
             inference_lr=config.inference_lr,
             update_bias = config.update_bias,
-            energy_fn_name=config.internal_energy_fn_name,                    
+            energy_fn_name=config.embedding_energy_fn_name,                    
         )

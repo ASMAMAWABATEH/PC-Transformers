@@ -13,13 +13,16 @@ def get_dynamic_model_config(trial, vocab_size, flash=False):
         return None
         
     num_heads = valid_heads[trial.suggest_int('head_idx', 0, len(valid_heads) - 1)]
-    block_size = trial.suggest_int("block_size", 64, 512, step=16)
+    # Keep block size aligned with the fixed encoded dataset length.
+    # The cache-enabled attention path expects the model sequence length
+    # to match the data sequence length, so we do not sweep this here.
+    block_size = 208
     n_blocks = trial.suggest_int('n_blocks', 1, 12)
     T = trial.suggest_int('T', 1, 14, log=True)
     dropout = trial.suggest_float("dropout", 0.0, 0.5)
     peak_lr = trial.suggest_float('peak_lr', 1e-5, 1e-2, log=True)
-    lr = peak_lr * 0.1
-    inference_lr = lr * 100 
+    lr = peak_lr * 0.1 
+    inference_lr = lr * 100
     warmup_steps = trial.suggest_int('warmup_steps', 50, 2000, log=True)
     update_bias = trial.suggest_int('update_bias_int', 0, 1) == 1
     batch_size = trial.suggest_categorical('batch_size', [4, 8, 16, 32])
@@ -43,7 +46,8 @@ def get_dynamic_model_config(trial, vocab_size, flash=False):
         batch_size = batch_size,
         num_epochs=num_epochs,
         update_bias=update_bias,
-        internal_energy_fn_name="pc_e",
+        internal_energy_fn_name="mae",
+        embedding_energy_fn_name="pc_e",
         output_energy_fn_name="pc_e",
         combined_internal_weight = combined_internal_weight,
         combined_output_weight = combined_output_weight,
@@ -58,7 +62,7 @@ def update_global_config(config):
         'dropout', 'lr', 'peak_learning_rate', 'warmup_steps',
         'update_bias', 'T', 'internal_energy_fn_name', 'output_energy_fn_name',
         'batch_size', 'num_epochs', 'combined_internal_weight', 
-        'combined_output_weight', 'alpha'
+        'combined_output_weight', 'alpha', 'embedding_energy_fn_name'
     ]
     
     for key in config_keys:

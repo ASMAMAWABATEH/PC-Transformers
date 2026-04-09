@@ -13,7 +13,6 @@ from utils.config_utils import load_best_config
 from utils.pc_utils import cleanup_memory
 from utils.model_utils import set_seed
 from eval import evaluate
-from visualization import plot_metrics
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from utils.device_utils import setup_device, cleanup_memory
@@ -133,9 +132,6 @@ def main():
 
     best_config = load_best_config()   
     # Configure logging
-    log_dir = 'logs'
-    os.makedirs(log_dir, exist_ok=True)
-
     # build handlers and remove existing ones
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -147,13 +143,8 @@ def main():
     stream_h.setFormatter(fmt)
     root_logger.addHandler(stream_h)
 
-    if rank == 0:
-        file_h = logging.FileHandler(os.path.join(log_dir, "training.log"), mode="a")
-        file_h.setFormatter(fmt)
-        root_logger.addHandler(file_h)
-
     logger = logging.getLogger(__name__)
-   
+
     config = GPTConfig(
         vocab_size = vocab_size,
         block_size = best_config["block_size"],
@@ -174,26 +165,20 @@ def main():
         combined_internal_weight=best_config["combined_internal_weight"],
         combined_output_weight=best_config["combined_output_weight"],
         use_flash_attention=best_config["use_flash_attention"],
-        alpha = best_config["alpha"]
+        alpha = best_config["alpha"],
+        embedding_energy_fn_name=best_config["embedding_energy_fn_name"]
     )
     
-    # Create a separate logger for hyperparameters
-    param_logger = logging.getLogger('param_logger')
-    param_logger.setLevel(logging.INFO)
-    if rank == 0 and root_logger.handlers:
-        param_logger.addHandler(root_logger.handlers[1])
-        param_logger.propagate = False
-
     if rank == 0:
-        param_logger.info(f"\n{'#' * 120}") 
+        logger.info(f"\n{'#' * 120}") 
         logger.info(f"Using device: {device} (local rank {local_rank})")
         try:
             cfg = config.__dict__
         except Exception:
             cfg = {k: getattr(config, k) for k in dir(config) if not k.startswith("_") and not callable(getattr(config, k))}
         config_json = json.dumps(cfg, indent=6, default=str)
-        param_logger.info("Saving the hyperparameters configurations:")
-        param_logger.info(config_json)
+        logger.info("Saving the hyperparameters configurations:")
+        logger.info(config_json)
 
     model = PCTransformer(config).to(device)
     if use_ddp:
@@ -261,13 +246,6 @@ def main():
                 logger.info(f"Saved checkpoint to {checkpoint_path}")
 
     if rank == 0:
-        plot_metrics(
-            train_energies,
-            val_energies,
-            train_perplexities,
-            val_perplexities
-        )
-
         os.makedirs("checkpoints", exist_ok=True)
         # Get the underlying model (handle both DDP and non-DDP cases)
         model_to_save = model.module if hasattr(model, 'module') else model

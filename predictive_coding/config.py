@@ -22,6 +22,7 @@ class GPTConfig:
         num_epochs (int): Number of training epochs.
         energy_fn_name (str): Name of the energy function to use for error computation.
         use_flash_attention (bool): Whether to use FlashAttention.
+        embedding_energy_fn_name (str): Energy function for the embedding layer.
     """
     vocab_size: int
     block_size: int
@@ -43,3 +44,4 @@ class GPTConfig:
     combined_output_weight: float
     use_flash_attention: bool
     alpha: float
+    embedding_energy_fn_name: str = "pc_e"

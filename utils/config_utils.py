@@ -12,7 +12,8 @@ def load_best_config():
         "dropout", "T", "num_heads", "n_blocks", "update_bias", "alpha",
         "lr", "inference_lr", "batch_size", "num_epochs", "internal_energy_fn_name",
         "output_energy_fn_name", "combined_internal_weight",
-        "combined_output_weight", "use_flash_attention"
+        "combined_output_weight", "use_flash_attention",
+        "embedding_energy_fn_name"
     }
 
     fallback_values = {
@@ -32,6 +33,7 @@ def load_best_config():
         "num_epochs": 10,
         "internal_energy_fn_name": "pc_e",
         "output_energy_fn_name": "pc_e",
+        "embedding_energy_fn_name": "pc_e",
         "combined_internal_weight": 0.8779955579743048,
         "combined_output_weight": 0.12200444202569516,
         "use_flash_attention": False
