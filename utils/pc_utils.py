@@ -191,11 +191,10 @@ def step_linear(
         mu = layer_norm(mu)
             
     if layer_type=="linear_output":
-        probs = F.softmax(mu, dim=-1) 
-        bu_err= target - probs
-        dE_dp= bu_err
-        norm_term = (dE_dp * probs).sum(dim=-1, keepdim=True)
-        dE_dmu = probs * (dE_dp - norm_term)
+        probs = F.softmax(mu, dim=-1)
+        # Use the CE gradient direction directly on the output logits.
+        dE_dmu = target - probs
+        bu_err = dE_dmu
         error_proj= dE_dmu @ layer.weight     # project bottom-up error through weights
 
     else:    
