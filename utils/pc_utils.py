@@ -1,10 +1,15 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import gc
 from typing import Optional, Tuple, Any
 from utils.attention_utils import apply_flash_attention, apply_standard_attention
-    
+
+ATTN_CHANGE_REPORT_EVERY = max(1, int(os.getenv("ATTN_CHANGE_REPORT_EVERY", "25")))
+_attention_change_report_counter = 0
+
+
 def x_init(batch_size: int, seq_len: int, embedding_size: int, device: torch.device = None) -> torch.Tensor:
     device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
     return torch.randn(batch_size, seq_len, embedding_size, device = device)
@@ -58,6 +63,59 @@ def rotate_half_transpose(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((x2, -x1), dim=-1)
+
+
+def _mean_abs_value(tensor: torch.Tensor) -> float:
+    return tensor.abs().mean().item()
+
+
+def _mean_abs_change(before: torch.Tensor, after: torch.Tensor) -> float:
+    return (after - before).abs().mean().item()
+
+
+def _next_attention_report_id() -> Optional[int]:
+    global _attention_change_report_counter
+    _attention_change_report_counter += 1
+    if _attention_change_report_counter % ATTN_CHANGE_REPORT_EVERY != 0:
+        return None
+    return _attention_change_report_counter
+
+
+def _print_attention_change_report(
+    report_id: int,
+    x_before: torch.Tensor,
+    x_after: torch.Tensor,
+    Wq_before: torch.Tensor,
+    Wk_before: torch.Tensor,
+    Wv_before: torch.Tensor,
+    Wq_after: torch.Tensor,
+    Wk_after: torch.Tensor,
+    Wv_after: torch.Tensor,
+) -> None:
+    print(
+        f"===== CHANGE REPORT ({report_id}, every {ATTN_CHANGE_REPORT_EVERY}) ====="
+    )
+    print("===== BEFORE / AFTER =====")
+    print(
+        f"x before: {_mean_abs_value(x_before):.6e} | "
+        f"x after: {_mean_abs_value(x_after):.6e} | "
+        f"x change: {_mean_abs_change(x_before, x_after):.6e}"
+    )
+    print(
+        f"Wq before: {_mean_abs_value(Wq_before):.6e} | "
+        f"Wq after: {_mean_abs_value(Wq_after):.6e} | "
+        f"Wq change: {_mean_abs_change(Wq_before, Wq_after):.6e}"
+    )
+    print(
+        f"Wk before: {_mean_abs_value(Wk_before):.6e} | "
+        f"Wk after: {_mean_abs_value(Wk_after):.6e} | "
+        f"Wk change: {_mean_abs_change(Wk_before, Wk_after):.6e}"
+    )
+    print(
+        f"Wv before: {_mean_abs_value(Wv_before):.6e} | "
+        f"Wv after: {_mean_abs_value(Wv_after):.6e} | "
+        f"Wv change: {_mean_abs_change(Wv_before, Wv_after):.6e}"
+    )
 
 def step_embed(
     t: int,
@@ -197,6 +255,8 @@ def step_attn(
     assert proj_layers is not None, "proj_layers dict is required for attention"
 
     device = x.device
+    report_id = _next_attention_report_id() if requires_update else None
+    x_before = x.detach().clone() if report_id is not None else None
     x_norm = layer_norm(x) if layer_norm is not None else x
 
     q_proj = proj_layers["q_proj"]
@@ -315,6 +375,9 @@ def step_attn(
     x = torch.clamp(x, -abs(clamp_value), abs(clamp_value))
 
     if requires_update:
+        Wq_before = q_proj.weight.clone().detach() if report_id is not None else None
+        Wk_before = k_proj.weight.clone().detach() if report_id is not None else None
+        Wv_before = v_proj.weight.clone().detach() if report_id is not None else None
         with torch.no_grad():
             for h in range(num_heads):
                 dW_q = torch.einsum("bte,btd->ed", x_norm, dE_dQ_raw[:, h])
@@ -343,6 +406,24 @@ def step_attn(
                         db_v = dE_dV[:, h].mean(dim=(0, 1))
                         db_v = torch.clamp(db_v, -0.01, 0.01)
                         v_proj.bias.data[h*head_dim:(h+1)*head_dim] += local_lr * db_v
+            if report_id is not None:
+                x_after = x.clone().detach()
+                Wq_after = q_proj.weight.clone().detach()
+                Wk_after = k_proj.weight.clone().detach()
+                Wv_after = v_proj.weight.clone().detach()
+
+        if report_id is not None:
+            _print_attention_change_report(
+                report_id=report_id,
+                x_before=x_before,
+                x_after=x_after,
+                Wq_before=Wq_before,
+                Wk_before=Wk_before,
+                Wv_before=Wv_before,
+                Wq_after=Wq_after,
+                Wk_after=Wk_after,
+                Wv_after=Wv_after,
+            )
     new_kv_cache = (K.detach(), V.detach()) if use_cache else None
     return x, mu, bu_err, new_kv_cache
 
