@@ -79,33 +79,26 @@ def train(model, dataloader, config, global_step, device, logger):
         total_ce_loss += ce_loss.item()
 
         internal_energies = []
-        output_energy = None
 
         for module in model.modules():
             if isinstance(module, PCLayer) and hasattr(module, "get_energy"):
                 energy = module.get_energy()
-                if energy is None or (isinstance(energy, float) and math.isnan(energy)):
+
+                if energy is None or math.isnan(float(energy)):
                     continue
 
                 if hasattr(module, 'layer_type') and module.layer_type == 'linear_output':
-                    if getattr(module, 'energy_fn_name', None) == "kld":
-                        output_energy = energy
-                    else:
-                        internal_energies.append(energy)
-                else:
-                    internal_energies.append(energy)
+                    continue
 
-                if hasattr(module, "_head_similarity_avg"):
-                    _ = module._head_similarity_avg
-                if hasattr(module, "_head_similarity_max"):
-                    _ = module._head_similarity_max
+                internal_energies.append(energy)
 
-        avg_internal_energy = sum(internal_energies) / len(internal_energies) if internal_energies else ce_loss.item()
-                
-        if output_energy is not None:
-            batch_energy = config.combined_internal_weight * avg_internal_energy + config.combined_output_weight * output_energy 
-        else:
-            batch_energy = avg_internal_energy
+        avg_internal_energy = (
+            sum(internal_energies) / len(internal_energies)
+            if internal_energies else ce_loss.item()
+        )
+
+        batch_energy = avg_internal_energy
+
         total_energy += batch_energy
         batch_count += 1
 

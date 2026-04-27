@@ -61,26 +61,25 @@ def evaluate(model, config, dataloader, max_batches=None, device = None):
         internal_energies = []
         output_energy = None
 
-        for module in model.modules():
-            if isinstance(module, PCLayer) and hasattr(module, "get_energy"):
-                energy = module.get_energy()
-                if energy is None or (isinstance(energy, float) and math.isnan(energy)):
-                    continue
+    for module in model.modules():
+     if isinstance(module, PCLayer) and hasattr(module, "get_energy"):
+        energy = module.get_energy()
+        if energy is None or (isinstance(energy, float) and math.isnan(energy)):
+            continue
 
-                if hasattr(module, 'layer_type') and module.layer_type == 'linear_output':
-                    if getattr(module, 'energy_fn_name', None) == "kld":
-                        output_energy = energy
-                    else:
-                        internal_energies.append(energy)
-                else: 
-                    internal_energies.append(energy)
+        # ignore output layer completely
+        if hasattr(module, 'layer_type') and module.layer_type == 'linear_output':
+            continue
 
-        avg_internal_energy = sum(internal_energies) / len(internal_energies)
+        internal_energies.append(energy)
+
+        avg_internal_energy = (
+    sum(internal_energies) / len(internal_energies)
+    if len(internal_energies) > 0
+    else 0.0
+)
                 
-        if output_energy is not None:
-           batch_energy = config.combined_internal_weight * avg_internal_energy + config.combined_output_weight * output_energy 
-        else:
-            batch_energy = avg_internal_energy
+        batch_energy = avg_internal_energy
 
         total_energy += batch_energy
         batch_count += 1
