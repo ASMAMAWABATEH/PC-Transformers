@@ -40,6 +40,7 @@ class PCLayer(nn.Module):
         self.local_lr = lr
         self.inference_lr = inference_lr
         self.clamp_value = 3.0
+        self.clip_value = 0.01
         self.energy_fn_name = energy_fn_name
         # Store output energy fn name separately
         self.output_energy_fn_name = output_energy_fn_name    # "ce"   — output layer
@@ -111,6 +112,7 @@ class PCLayer(nn.Module):
                 input_ids,
                 self.local_lr,
                 self.clamp_value,
+                self.clip_value
                 self.energy_fn_name,
                 requires_update,
                 layer_norm=layer_norm,
@@ -142,6 +144,7 @@ class PCLayer(nn.Module):
                 self.local_lr,
                 self.inference_lr,
                 self.clamp_value,
+                self.clip_value,
                 self.energy_fn_name,
                 requires_update,
                 self.num_heads,
@@ -170,7 +173,8 @@ class PCLayer(nn.Module):
                 layer_type,
                 self.local_lr, 
                 self.inference_lr,
-                self.clamp_value, 
+                self.clamp_value,
+                self.clip_value, 
                 self.energy_fn_name, 
                 requires_update,
                 td_err=td_err, 
