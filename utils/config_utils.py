@@ -43,6 +43,8 @@ def load_best_config():
         "optimizer_eps": 1e-8,
         "optimizer_weight_decay": 0.01,
         "optimizer_momentum": 0.9, #for sgd_momentum
+        "clamp_value": 3.0,
+        "clip_value": 0.01
     }
 
     config = {}
