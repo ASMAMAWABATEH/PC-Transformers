@@ -13,7 +13,6 @@ from utils.optim.optim_utils import PCOptimizer
 from predictive_coding.lateral_connc import LateralConnections
 from utils.config_utils import load_best_config
 
-
 class PCLayer(nn.Module):
     """
     Predictive Coding Layer wrapper that manages iterative inference state and
@@ -25,6 +24,8 @@ class PCLayer(nn.Module):
         lr: float,
         inference_lr: float,
         energy_fn_name: str,
+        use_precision_weighting: bool = True,
+        precision_lr: float = 1e-7,
         # Added output_energy_fn_name
         output_energy_fn_name: str = "ce",
         num_heads: Optional[int] = None,
@@ -49,6 +50,15 @@ class PCLayer(nn.Module):
         self.output_energy_fn_name = output_energy_fn_name    # "ce"   — output layer
         self.num_heads = num_heads
         self.n_embed = n_embed
+
+        # Precision weighting parameters
+        self.use_precision_weighting = use_precision_weighting
+        self.precision_lr = precision_lr
+        # Cholesky factor L per layer — P = LLᵀ always positive definite.
+        # sigma_inv kept as alias to P for compatibility with step functions.
+        self.sigma_inv: Dict[str, torch.Tensor] = {}   # P = LLT
+        self._chol_L:   Dict[str, torch.Tensor] = {}   # lower triangular L
+
         self.optimizer = PCOptimizer(
             opt_name=optimizer_name,
             beta1=optimizer_beta1,
@@ -71,6 +81,66 @@ class PCLayer(nn.Module):
         if layer_type not in self.lateral_connections:
             self.lateral_connections[layer_type] = LateralConnections(size, self.local_lr, self.inference_lr)
             self.add_module(f"lateral_{layer_type}", self.lateral_connections[layer_type])
+
+
+    def get_or_init_sigma_inv(self, layer_type: str, size: int, device: torch.device) -> Optional[torch.Tensor]:
+        """
+        Return precision matrix P = LLᵀ for this layer type.
+        L is initialised to identity so P = I at the start.
+        """
+        if not self.use_precision_weighting or layer_type == "linear_output":
+            return None
+
+        if layer_type not in self._chol_L:
+            # Start from L = I  →  P = I·Iᵀ = I
+            self._chol_L[layer_type]   = torch.eye(size, device=device)
+            self.sigma_inv[layer_type] = torch.eye(size, device=device)
+
+        return self.sigma_inv[layer_type]
+
+    def update_sigma_inv(self, layer_type: str, mismatch: torch.Tensor) -> None:
+        """
+        Update precision P = LLᵀ via gradient descent on the Cholesky factor L.
+        Sigma = P⁻¹ computed via two triangular solves — O(D²), always stable.
+        Positive definiteness is guaranteed by construction: P = LLᵀ ≥ 0 always.
+        """
+        if not self.use_precision_weighting or layer_type == "linear_output":
+            return
+        if layer_type not in self._chol_L:
+            return
+
+        # Sample covariance S = eT e / N  shape (D, D)
+        e = mismatch.detach().reshape(-1, mismatch.size(-1))
+        S = (e.T @ e) / max(e.shape[0], 1)
+
+        # Current Cholesky factor L and precision P = LLT
+        L = self._chol_L[layer_type]
+        P = self.sigma_inv[layer_type]
+
+        # Compute Sigma = P^-1 via triangular solve — no linalg.inv
+        # Solve L X = I  =>  X = L^-1  =>  Sigma = XT X = L^-T L^-1
+        eye = torch.eye(L.size(-1), device=L.device, dtype=L.dtype)
+        L_inv = torch.linalg.solve_triangular(L, eye, upper=False)
+        Sigma = L_inv.T @ L_inv
+
+        # Gradient of free energy w.r.t. P  (Bogacz 2017, Friston 2008)
+        # dF/dP = 0.5 * S - 0.5 * Sigma
+        grad_P = 0.5 * S - 0.5 * Sigma
+
+        # Chain rule through P = LLT  =>  dF/dL = 2 * grad_P @ L
+        grad_L = 2.0 * grad_P @ L
+        grad_L = torch.clip(grad_L, -1.0, 1.0)
+
+        # Update L and enforce lower triangular structure
+        new_L = L - self.precision_lr * grad_L
+        new_L = torch.tril(new_L)
+
+        # Recompute P = LLT — always positive semi-definite by construction
+        new_P = new_L @ new_L.T
+
+        self._chol_L[layer_type]   = new_L
+        self.sigma_inv[layer_type] = new_P
+        
 
     def _reset_step_state(self) -> None:
         """Reset step-local accumulators, kept for future extension."""
@@ -106,6 +176,8 @@ class PCLayer(nn.Module):
 
 
         if layer_type == "embed":
+            sigma_inv = self.get_or_init_sigma_inv(layer_type, target_activity.size(-1), target_activity.device)
+
             mu, mu_word, bu_err = step_embed(
                 t,
                 T,
@@ -120,6 +192,7 @@ class PCLayer(nn.Module):
                 requires_update,
                 layer_norm=layer_norm,
                 optimizer=self.optimizer,
+                sigma_inv=sigma_inv,
             )            
             # store for later retrieval
             self._x_cache["embed"] = (mu_word)
@@ -129,13 +202,23 @@ class PCLayer(nn.Module):
 
             # compute energy
             error = target_activity - mu
-            energy, step_errors = finalize_step(mu, target_activity, error, t, layer_type, self.energy_fn_name, self.output_energy_fn_name)# output_energy_fn_name passed for consistent signature
+                
+            energy, step_errors = finalize_step(
+                mu, target_activity, error, t, layer_type,
+                self.energy_fn_name, self.output_energy_fn_name,
+                sigma_inv=sigma_inv,
+            )
             self._energy_scalar = energy  # overwrite each step; only the last T-step survives
             self._errors.extend(step_errors)
+            
+            if requires_update and sigma_inv is not None:
+                self.update_sigma_inv(layer_type, error)
             return mu_word
         
         elif layer_type == "attn":
-            lateral_conn = None#self.lateral_connections.get(layer_type, None)
+            sigma_inv = self.get_or_init_sigma_inv(layer_type, target_activity.size(-1), target_activity.device)
+            
+            lateral_conn = None
             x, mu, bu_err, new_kv_cache = step_attn(
                 t,
                 T,
@@ -159,13 +242,19 @@ class PCLayer(nn.Module):
                 kv_cache=kv_cache,  
                 use_cache=use_cache,
                 optimizer=self.optimizer,
+                sigma_inv=sigma_inv,
             )
+            error = target_activity - mu
+            if requires_update and sigma_inv is not None:
+                self.update_sigma_inv(layer_type, error)
             # Store cache for retrieval
             if use_cache:
                 self._last_kv_cache = new_kv_cache
         
         else:
-            lateral_conn = None #self.lateral_connections.get(layer_type, None)
+            sigma_inv = self.get_or_init_sigma_inv(layer_type, target_activity.size(-1), target_activity.device) if target_activity is not None else None
+
+            lateral_conn = None
             x, mu, bu_err = step_linear(
                 t,
                 T,
@@ -183,6 +272,7 @@ class PCLayer(nn.Module):
                 td_err=td_err, 
                 layer_norm=layer_norm,
                 optimizer=self.optimizer,
+                sigma_inv=sigma_inv,
             )
             
         # cache and stats
@@ -195,10 +285,18 @@ class PCLayer(nn.Module):
         # generation; there is no prediction error / energy to record then.
         if target_activity is not None:
             error = target_activity - mu
-            energy, step_errors = finalize_step(mu, target_activity, error, t, layer_type, self.energy_fn_name)
+    
+            energy, step_errors = finalize_step(
+                mu, target_activity, error, t, layer_type,
+                self.energy_fn_name, self.output_energy_fn_name,
+                sigma_inv=sigma_inv,
+            )
             self._energy_scalar = energy  # overwrite each step; only the last T-step survives
             self._errors.extend(step_errors)
-
+            
+            if requires_update and sigma_inv is not None:
+                self.update_sigma_inv(layer_type, error)
+                
         # update x cache
         self._x_cache[layer_type] = x
         return x, mu
@@ -248,6 +346,10 @@ class PCLayer(nn.Module):
     def get_x(self, layer_type: str) -> Optional[torch.Tensor]:
         """Get the cached activity tensor for a given layer type."""
         return self._x_cache.get(layer_type, None)
+    
+    def get_sigma_inv(self, layer_type: str) -> Optional[torch.Tensor]:
+        """Get the cached inverse precision tensor for a given layer type."""
+        return self.sigma_inv.get(layer_type, None)
     
     def get_mu(self, layer_type: str) -> Optional[torch.Tensor]:
         """Get the cached mu (prediction) tensor for a given layer type."""
