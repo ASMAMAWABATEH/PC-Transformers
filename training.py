@@ -61,6 +61,7 @@ def train(model, dataloader, config, global_step, device, logger):
                 
         global_step += 1
             
+
         logits = model(target_ids, input_ids)
 
         sync_pc_weights(model)
@@ -178,6 +179,9 @@ def main():
         optimizer_eps = best_config["optimizer_eps"],
         optimizer_momentum=best_config.get("optimizer_momentum", 0.9),
         optimizer_weight_decay=best_config.get("optimizer_weight_decay", 0.1),
+        # Precision weighting — eˡ = (Σˡ)⁻¹·(zˡ-z̄ˡ)
+        use_precision_weighting=best_config["use_precision_weighting"],
+        precision_lr=best_config["precision_lr"],
     
     )
     
