@@ -5,10 +5,10 @@ import gc
 from typing import Optional, Tuple, Any
 from utils.attention_utils import apply_flash_attention, apply_standard_attention
 from utils.optim.optim_utils import PCOptimizer
-from utils.actfx_utils import d_gelu    
+    
 def x_init(batch_size: int, seq_len: int, embedding_size: int, device: torch.device = None) -> torch.Tensor:
     device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
-    return torch.zeros(batch_size, seq_len, embedding_size, device = device)
+    return torch.randn(batch_size, seq_len, embedding_size, device = device)
 
 def precompute_freqs_cis_real(dim: int, end: int, theta: float = 10000.0):
     """
@@ -112,6 +112,7 @@ def step_embed(
     requires_update: bool,
     layer_norm: Optional[nn.Module] = None,
     optimizer: Optional[PCOptimizer] = None,
+    sigma_inv: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Predictive coding step for embedding layer.
@@ -123,6 +124,9 @@ def step_embed(
     mu = mu_word 
     
     error = target - mu
+    # Apply precision weighting
+    if sigma_inv is not None:
+        error = error @ sigma_inv
         
     if requires_update: 
         with torch.no_grad():
@@ -155,6 +159,7 @@ def step_linear(
     td_err: Optional[torch.Tensor],
     layer_norm: Optional[nn.Module], 
     optimizer: Optional[PCOptimizer] = None,
+    sigma_inv: Optional[torch.Tensor] = None,
    ):
     """
     Predictive coding step for linear-like layers.
@@ -181,15 +186,14 @@ def step_linear(
             bu_err= target - probs
             dE_dmu = bu_err
             error_proj= dE_dmu @ layer.weight     # project bottom-up error through weights
-    elif layer_type=="fc2":
-        bu_err = target - mu 
-        dE_dmu = bu_err
-        error_proj = bu_err @ layer.weight  # [B, S, 128] @ [128, 512] → [B, S, 512] ✓
-        error_proj = error_proj * d_gelu(x)
     else:
         bu_err = target - mu 
+        # Apply precision weighting
+        if sigma_inv is not None:
+            bu_err = bu_err @ sigma_inv
         dE_dmu = bu_err
-        error_proj= dE_dmu @ layer.weight       
+        
+    error_proj= dE_dmu @ layer.weight       
     error = error_proj- td_err if td_err is not None else error_proj  
    
     if lateral_conn is not None:
@@ -244,6 +248,7 @@ def step_attn(
     use_cache: bool = False,
     optimizer: Optional[PCOptimizer] = None,
     current_seq_len: int = None,
+    sigma_inv: Optional[torch.Tensor] = None,
     ):
     """
     Predictive coding step for attention using Sine-Cosine RoPE.
@@ -306,7 +311,9 @@ def step_attn(
     
     mu = mu_heads.transpose(1, 2).contiguous().view(B, S, E)
     bu_err = target - mu
-    
+    # Apply precision weighting
+    if sigma_inv is not None:
+        bu_err = bu_err @ sigma_inv
     # deleted to insert the delta_x after the for loop below
     # error = bu_err - td_err if td_err is not None else bu_err  
      
@@ -431,7 +438,10 @@ def step_attn(
     return x, mu, bu_err, new_kv_cache
 
 ENERGY_FUNCTIONS = {
-    "pc_e": lambda mu, x: ((x - mu) ** 2) * 0.5,
+    "nll": lambda mu, x, precision: (
+        0.5 * (((x - mu) @ precision) * (x - mu)).sum(dim=-1, keepdim=True)
+        - 0.5 * torch.logdet(precision)
+    ),
     # Added: CE energy for output layer
     "ce": lambda mu, x: F.cross_entropy(
         mu.reshape(-1, mu.size(-1)),
@@ -441,12 +451,18 @@ ENERGY_FUNCTIONS = {
     "kld": lambda mu, x: F.kl_div(mu.log_softmax(dim=-1), x, reduction="batchmean")
 }
 
-def energy_fn(mu: torch.Tensor, x: torch.Tensor,energy_fn_name: str) -> torch.Tensor:
+def energy_fn(mu: torch.Tensor, x: torch.Tensor, energy_fn_name: str, precision: Optional[torch.Tensor] = None) -> torch.Tensor:
     if energy_fn_name not in ENERGY_FUNCTIONS:
         raise ValueError(f"Unknown energy function: {energy_fn_name}. Choose from {list(ENERGY_FUNCTIONS.keys())}")
+    if energy_fn_name == "nll":
+        if precision is None:
+            precision = torch.eye(mu.shape[-1], device=mu.device, dtype=mu.dtype)
+        else:
+            precision = precision.to(device=mu.device, dtype=mu.dtype)
+        return ENERGY_FUNCTIONS[energy_fn_name](mu, x, precision)
     return ENERGY_FUNCTIONS[energy_fn_name](mu, x)
 
-def finalize_step(mu: torch.Tensor, target: torch.Tensor, error: torch.Tensor, t: int, layer_type: str, energy_fn_name: str, output_energy_fn_name: str = "ce"): # added: CE for output layer
+def finalize_step(mu: torch.Tensor, target: torch.Tensor, error: torch.Tensor, t: int, layer_type: str, energy_fn_name: str, output_energy_fn_name: str = "ce", sigma_inv: Optional[torch.Tensor] = None,): # added: CE for output layer
     device = mu.device
     target = target.to(device)
     error = error.to(device)
@@ -454,9 +470,13 @@ def finalize_step(mu: torch.Tensor, target: torch.Tensor, error: torch.Tensor, t
     fn_name = (
         output_energy_fn_name     # "ce"   — linear_output
         if layer_type == "linear_output"
-        else energy_fn_name       # "pc_e" — all hidden layers
+        else energy_fn_name       # "nll" — all hidden layers
     )
-    energy = float(energy_fn(mu, target, fn_name).sum().item())
+    
+    # Precision is only meaningful for hidden-layer NLL; output layer gets None
+    precision = sigma_inv if layer_type != "linear_output" else None
+    energy_tensor = energy_fn(mu, target, fn_name, precision=precision)
+    energy = float(energy_tensor.sum().item())
     errors = [{"step": t, "type": layer_type, "error": error.mean().item()}]
     return energy, errors
     
