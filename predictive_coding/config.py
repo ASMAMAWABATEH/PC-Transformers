@@ -25,6 +25,8 @@ class GPTConfig:
         optimizer_beta1 (float): Adam beta1 coefficient.
         optimizer_beta2 (float): Adam beta2 coefficient.
         optimizer_eps (float): Adam epsilon.
+        use_precision_weighting (bool): Enable learnable precision matrix per hidden layer.
+        precision_lr (float): Learning rate for Cholesky precision factor update.
     """
     vocab_size: int
     block_size: int
@@ -54,3 +56,6 @@ class GPTConfig:
     optimizer_eps: float = 1e-8
     optimizer_momentum: float = 0.9
     optimizer_weight_decay: float = 0.01
+    # Precision weighting fields — eˡ = (Σˡ)⁻¹·(zˡ-z̄ˡ)
+    use_precision_weighting: bool = True
+    precision_lr: float = 1e-7
