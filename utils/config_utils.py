@@ -14,7 +14,9 @@ def load_best_config():
         "output_energy_fn_name", "combined_internal_weight",
         "combined_output_weight", "use_flash_attention",
         "optimizer_name", "output_optimizer_name", "optimizer_beta1", "optimizer_beta2", "optimizer_eps",
-        "optimizer_weight_decay", "optimizer_momentum", "clamp_value", "clip_value"
+        "optimizer_weight_decay", "optimizer_momentum", "clamp_value", "clip_value",
+        # Precision weighting keys
+        "use_precision_weighting", "precision_lr",
     }
 
     fallback_values = {
@@ -31,7 +33,7 @@ def load_best_config():
         "inference_lr": 0.096,
         "batch_size": 8,
         "num_epochs": 5,
-        "internal_energy_fn_name": "pc_e",
+        "internal_energy_fn_name": "nll",
         "output_energy_fn_name": "ce",
         "combined_internal_weight": 0.8779955579743048,
         "combined_output_weight": 0.12200444202569516,
@@ -45,6 +47,9 @@ def load_best_config():
         "optimizer_momentum": 0.9, #for sgd_momentum
         "clip_value": 0.019,
         "clamp_value": 3,
+        # Precision weighting defaults - eˡ = (Σˡ)⁻¹·(zˡ-z̄ˡ)
+        "use_precision_weighting": True,
+        "precision_lr": 1e-7,
     }
 
     config = {}
