@@ -1,5 +1,6 @@
 import torch.nn as nn
 from predictive_coding.pc_layer import PCLayer
+from utils.model_utils import init_weights
 
 class MLP(nn.Module):
     """
@@ -13,10 +14,14 @@ class MLP(nn.Module):
         self.fc2 = nn.Linear(4 * config.n_embed, config.n_embed)
         self.dropout = nn.Dropout(config.dropout)
 
+        for layer in (self.fc1, self.fc2):
+            init_weights(layer, config.weight_init_type)
+
+        # Hidden predictive coding layers -> use hidden_lr / hidden_inference_lr
         self.pc_layer2 = PCLayer(
             T=config.T,
-            lr=config.lr,
-            inference_lr=config.inference_lr,
+            lr=config.hidden_lr,
+            inference_lr=config.hidden_inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
             optimizer_name=config.optimizer_name,
             optimizer_beta1=config.optimizer_beta1,
@@ -28,8 +33,8 @@ class MLP(nn.Module):
 
         self.pc_layer1 = PCLayer(
             T=config.T,
-            lr=config.lr,
-            inference_lr=config.inference_lr,
+            lr=config.hidden_lr,
+            inference_lr=config.hidden_inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
             optimizer_name=config.optimizer_name,
             optimizer_beta1=config.optimizer_beta1,
