@@ -11,7 +11,23 @@ class GPTConfig:
         block_size (int): Maximum sequence length.
         n_embed (int): Embedding dimension size.
         dropout (float): Dropout probability.
-        lr (float): Local learning rate for predictive coding layers.
+        lr (float): [DEPRECATED] Local learning rate for predictive coding layers.
+            Kept for backward compatibility. Used as the fallback value for
+            hidden_lr/output_lr when those are not explicitly provided.
+        inference_lr (float): [DEPRECATED] Inference learning rate. Kept for
+            backward compatibility. Used as the fallback value for
+            hidden_inference_lr/output_inference_lr when not explicitly provided.
+        hidden_lr (Optional[float]): Local learning rate for hidden predictive
+            coding layers (embed, attn, linear_attn, fc1, fc2). Falls back to
+            `lr` if not set.
+        output_lr (Optional[float]): Local learning rate for the output
+            (linear_output) predictive coding layer. Falls back to `lr` if not set.
+        hidden_inference_lr (Optional[float]): Inference learning rate for
+            hidden predictive coding layers. Falls back to `inference_lr` if not set.
+        output_inference_lr (Optional[float]): Inference learning rate for the
+            output predictive coding layer. Falls back to `inference_lr` if not set.
+        weight_init_type (str): Weight initialization strategy applied to
+            trainable weight matrices ("default", "xavier", "kaiming", "normal").
         peak_learning_rate (float): Peak learning rate for learning rate scheduling.
         warmup_steps (int): Number of warmup steps for learning rate scheduling.
         T (int): Number of inference steps for predictive coding.
@@ -54,3 +70,32 @@ class GPTConfig:
     optimizer_eps: float = 1e-8
     optimizer_momentum: float = 0.9
     optimizer_weight_decay: float = 0.01
+
+    # --- Hidden/output learning-rate split (new) ---
+    hidden_lr: Optional[float] = None
+    output_lr: Optional[float] = None
+    hidden_inference_lr: Optional[float] = None
+    output_inference_lr: Optional[float] = None
+
+    # --- Configurable weight initialization (new) ---
+    weight_init_type: str = "default"
+
+    def __post_init__(self):
+        # Fall back to the deprecated flat lr/inference_lr if hidden/output
+        # variants were not explicitly provided. Keeps old configs/tuning
+        # files working unchanged.
+        if self.hidden_lr is None:
+            self.hidden_lr = self.lr
+        if self.output_lr is None:
+            self.output_lr = self.lr
+        if self.hidden_inference_lr is None:
+            self.hidden_inference_lr = self.inference_lr
+        if self.output_inference_lr is None:
+            self.output_inference_lr = self.inference_lr
+
+        valid_init_types = {"default", "xavier", "kaiming", "normal"}
+        if self.weight_init_type not in valid_init_types:
+            raise ValueError(
+                f"Invalid weight_init_type: {self.weight_init_type!r}. "
+                f"Choose from {sorted(valid_init_types)}."
+            )
