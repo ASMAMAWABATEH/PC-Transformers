@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 import random
 import os
-from model_architecture.pc_t_model import PCTransformer
 from bert_score import score as bertscore
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 
@@ -46,6 +45,7 @@ def init_weights(module: nn.Module, weight_init_type: str = "default") -> None:
 
 
 def load_model(model_path, config):
+    from model_architecture.pc_t_model import PCTransformer  # local import: avoids circular import
     model = PCTransformer(config)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
