@@ -28,6 +28,27 @@ Usage: torchrun --nproc-per-node=<NUM_GPU> training.py
 
 """
 
+
+def _scheduled_lr(base_lr, peak_lr, global_step, warmup_steps, total_steps):
+    """
+    Compute a warmup + cosine-decay scheduled learning rate for a given base_lr.
+
+    Shares the same schedule shape (linear warmup to peak_lr, then cosine decay
+    to 10% of peak_lr) used previously for the single flat `lr`; parametrized
+    here by `base_lr` so hidden and output layers can each anchor their own
+    starting point while sharing the same peak_learning_rate/warmup_steps
+    schedule configuration.
+    """
+    if global_step < warmup_steps:
+        return base_lr + global_step / warmup_steps * (peak_lr - base_lr)
+    else:
+        decay_step = global_step - warmup_steps
+        decay_total = total_steps - warmup_steps
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * decay_step / decay_total))
+        min_lr = 0.1 * peak_lr
+        return min_lr + (peak_lr - min_lr) * cosine_decay
+
+
 def train(model, dataloader, config, global_step, device, logger):
     model.train()
     total_ce_loss = 0.0
@@ -41,24 +62,25 @@ def train(model, dataloader, config, global_step, device, logger):
         target_ids = batch["target_ids"].to(device)
 
         total_steps = len(dataloader) * config.num_epochs
-        
-        if global_step < config.warmup_steps:
-            lr = config.lr + global_step / config.warmup_steps * (
-                config.peak_learning_rate - config.lr)
-        else:
-            # Cosine decay after warmup
-            decay_step = global_step - config.warmup_steps
-            decay_total = total_steps - config.warmup_steps
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * decay_step / decay_total))
-            
-            # Minimum learning rate = 10% of peak_lr
-            min_lr = 0.1 * config.peak_learning_rate
-            lr = min_lr + (config.peak_learning_rate - min_lr) * cosine_decay
+
+        # Separate warmup/cosine schedules for hidden vs. output layers,
+        # anchored on config.hidden_lr / config.output_lr respectively.
+        hidden_lr = _scheduled_lr(
+            config.hidden_lr, config.peak_learning_rate,
+            global_step, config.warmup_steps, total_steps,
+        )
+        output_lr = _scheduled_lr(
+            config.output_lr, config.peak_learning_rate,
+            global_step, config.warmup_steps, total_steps,
+        )
 
         for module in model.modules():
             if hasattr(module, 'local_lr'):
-                module.set_learning_rate(lr)
-                
+                if module is output_pc_layer:
+                    module.set_learning_rate(output_lr)
+                else:
+                    module.set_learning_rate(hidden_lr)
+
         global_step += 1
             
         logits = model(target_ids, input_ids)
@@ -178,7 +200,13 @@ def main():
         optimizer_eps = best_config["optimizer_eps"],
         optimizer_momentum=best_config.get("optimizer_momentum", 0.9),
         optimizer_weight_decay=best_config.get("optimizer_weight_decay", 0.1),
-    
+        # --- Hidden/output learning-rate split (new) ---
+        hidden_lr=best_config.get("hidden_lr"),
+        output_lr=best_config.get("output_lr"),
+        hidden_inference_lr=best_config.get("hidden_inference_lr"),
+        output_inference_lr=best_config.get("output_inference_lr"),
+        # --- Configurable weight initialization (new) ---
+        weight_init_type=best_config.get("weight_init_type", "default"),
     )
     
     # Create a separate logger for hyperparameters
