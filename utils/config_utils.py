@@ -14,7 +14,11 @@ def load_best_config():
         "output_energy_fn_name", "combined_internal_weight",
         "combined_output_weight", "use_flash_attention",
         "optimizer_name", "output_optimizer_name", "optimizer_beta1", "optimizer_beta2", "optimizer_eps",
-        "optimizer_weight_decay", "optimizer_momentum", "clamp_value", "clip_value"
+        "optimizer_weight_decay", "optimizer_momentum", "clamp_value", "clip_value",
+        # --- Hidden/output learning-rate split (new) ---
+        "hidden_lr", "output_lr", "hidden_inference_lr", "output_inference_lr",
+        # --- Configurable weight initialization (new) ---
+        "weight_init_type",
     }
 
     fallback_values = {
@@ -45,6 +49,15 @@ def load_best_config():
         "optimizer_momentum": 0.9, #for sgd_momentum
         "clip_value": 0.019,
         "clamp_value": 3,
+        # --- Hidden/output learning-rate split (new) ---
+        # Default to the same values as the legacy flat lr/inference_lr,
+        # so behavior is unchanged unless a tuning file explicitly overrides these.
+        "hidden_lr": 0.003223786832283688,
+        "output_lr": 0.003223786832283688,
+        "hidden_inference_lr": 0.096,
+        "output_inference_lr": 0.096,
+        # --- Configurable weight initialization (new) ---
+        "weight_init_type": "default",
     }
 
     config = {}
