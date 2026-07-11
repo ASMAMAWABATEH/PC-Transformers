@@ -1,5 +1,6 @@
 import torch.nn as nn
 from predictive_coding.pc_layer import PCLayer
+from utils.model_utils import init_weights
 
 class Attention(nn.Module):
     """
@@ -20,10 +21,14 @@ class Attention(nn.Module):
         self.v = nn.Linear(config.n_embed, config.n_embed)
         self.output = nn.Linear(config.n_embed, config.n_embed)
 
+        # Hidden predictive coding layer -> use hidden_lr / hidden_inference_lr
+        for layer in (self.q, self.k, self.v, self.output):
+            init_weights(layer, config.weight_init_type)
+
         self.pc_qkv = PCLayer(
             T=config.T,
-            lr=config.lr,
-            inference_lr=config.inference_lr,
+            lr=config.hidden_lr,
+            inference_lr=config.hidden_inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
             num_heads=config.num_heads,
             n_embed=config.n_embed,
@@ -37,8 +42,8 @@ class Attention(nn.Module):
 
         self.pc_output = PCLayer(
             T=config.T,
-            lr=config.lr,
-            inference_lr=config.inference_lr,
+            lr=config.hidden_lr,
+            inference_lr=config.hidden_inference_lr,
             energy_fn_name=config.internal_energy_fn_name,
             optimizer_name=config.optimizer_name,
             optimizer_beta1=config.optimizer_beta1,
