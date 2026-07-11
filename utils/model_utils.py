@@ -1,10 +1,49 @@
 import torch
+import torch.nn as nn
 import numpy as np
 import random
 import os
 from model_architecture.pc_t_model import PCTransformer
 from bert_score import score as bertscore
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+
+
+def init_weights(module: nn.Module, weight_init_type: str = "default") -> None:
+    """
+    Initialize the trainable weight matrix of a module according to weight_init_type.
+
+    Only ever touches `module.weight`. Never touches `module.bias` and is never
+    called on LayerNorm/RMSNorm modules by any call site — callers are
+    responsible for only passing trainable weight-matrix modules
+    (nn.Linear, nn.Embedding) here.
+
+    Args:
+        module: An nn.Linear or nn.Embedding instance (or any module exposing
+            a `.weight` tensor of the appropriate shape).
+        weight_init_type: One of "default", "xavier", "kaiming", "normal".
+            "default" is a no-op — it preserves whatever init PyTorch already
+            applied at construction time, so existing behavior is unchanged
+            unless this is explicitly overridden via config.
+    """
+    if weight_init_type == "default":
+        return
+
+    if not hasattr(module, "weight") or module.weight is None:
+        return
+
+    with torch.no_grad():
+        if weight_init_type == "xavier":
+            nn.init.xavier_uniform_(module.weight)
+        elif weight_init_type == "kaiming":
+            nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+        elif weight_init_type == "normal":
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        else:
+            raise ValueError(
+                f"Unknown weight_init_type: {weight_init_type!r}. "
+                f"Choose from ['default', 'xavier', 'kaiming', 'normal']."
+            )
+
 
 def load_model(model_path, config):
     model = PCTransformer(config)
